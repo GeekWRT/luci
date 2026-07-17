@@ -5,30 +5,52 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
-permissions: write-all
-
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup git identity
-        run: |
-          git config user.email "geekwrt@users.noreply.github.com"
-          git config user.name "GeekWRT"
-
       - name: Sync with upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
+
+          # 1. Fetch upstream
           git remote add upstream https://github.com/openwrt/luci.git
           git fetch origin master
           git fetch upstream master
+
+          # 2. If already up to date, exit early
+          if git merge-base --is-ancestor origin/master upstream/master 2>/dev/null && git diff --quiet origin/master upstream/master; then
+            echo "Already up to date"
+            exit 0
+          fi
+
+          # 3. Create a merge commit via the Git Data API
+          # Get the tree from a merge between upstream/master and origin/master
+          UPSTREAM_SHA=$(git rev-parse upstream/master)
+          FORK_SHA=$(git rev-parse origin/master)
+
+          # Write merge tree
           git checkout master
-          git rebase upstream/master || {
-            echo "CONFLICT! aborting..."
-            git rebase --abort
-            exit 1
-          }
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git master --force
+          git merge -s recursive -X theirs --no-commit upstream/master 2>/dev/null || true
+          git add -A
+          git commit --no-edit -m "Merge upstream/master into master" 2>/dev/null || echo "Nothing to commit"
+
+          # 4. Push via GITHUB_TOKEN (if no workflow files changed) or via API
+          if ! git diff --name-only HEAD~1..HEAD -- .github/workflows/ 2>/dev/null | grep -q .; then
+            # No workflow files changed, push normally
+            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git master
+          else
+            # Workflow files changed, use gh API to update ref
+            NEW_SHA=$(git rev-parse HEAD)
+            echo "Workflow files changed, using API to update ref..."
+            gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/master"               --field sha="$NEW_SHA"               --field force=true
+            echo "Ref updated via API: $NEW_SHA"
+          fi
