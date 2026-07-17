@@ -26,7 +26,8 @@ jobs:
           git fetch origin master
           git fetch upstream master
           git checkout master
-          if git merge-base --is-ancestor origin/master upstream/master 2>/dev/null &&              git diff --quiet origin/master upstream/master 2>/dev/null; then
+          if git merge-base --is-ancestor origin/master upstream/master 2>/dev/null && \
+             git diff --quiet origin/master upstream/master 2>/dev/null; then
             echo "Already up to date"
             exit 0
           fi
@@ -35,4 +36,4 @@ jobs:
             git rebase --abort
             exit 1
           }
-          git push https://x-access-token:${{ secrets.GH_SYNC_TOKEN }}@github.com/${{ github.repository }}.git master --force
+          git push https://GeekWRT:${{ secrets.GH_SYNC_TOKEN }}@github.com/${{ github.repository }}.git master --force
