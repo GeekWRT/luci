@@ -20,37 +20,42 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-
-          # 1. Fetch upstream
+          echo "Fetching upstream..."
           git remote add upstream https://github.com/openwrt/luci.git
           git fetch origin master
           git fetch upstream master
 
-          # 2. If already up to date, exit early
-          if git merge-base --is-ancestor origin/master upstream/master 2>/dev/null && git diff --quiet origin/master upstream/master; then
-            echo "Already up to date"
+          # Check if already up to date
+          if git merge-base --is-ancestor origin/master upstream/master &&              git diff --quiet origin/master upstream/master; then
+            echo "Already up to date with upstream"
             exit 0
           fi
 
-          # 3. Create a merge commit via the Git Data API
-          # Get the tree from a merge between upstream/master and origin/master
-          UPSTREAM_SHA=$(git rev-parse upstream/master)
-          FORK_SHA=$(git rev-parse origin/master)
-
-          # Write merge tree
+          # Try fast-forward first
           git checkout master
-          git merge -s recursive -X theirs --no-commit upstream/master 2>/dev/null || true
-          git add -A
-          git commit --no-edit -m "Merge upstream/master into master" 2>/dev/null || echo "Nothing to commit"
-
-          # 4. Push via GITHUB_TOKEN (if no workflow files changed) or via API
-          if ! git diff --name-only HEAD~1..HEAD -- .github/workflows/ 2>/dev/null | grep -q .; then
-            # No workflow files changed, push normally
-            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git master
+          if git merge --ff-only upstream/master 2>/dev/null; then
+            echo "Fast-forward merge successful"
           else
-            # Workflow files changed, use gh API to update ref
-            NEW_SHA=$(git rev-parse HEAD)
+            echo "Not fast-forward, updating via merge..."
+            # Use git merge to create a merge commit
+            git merge -m "Merge upstream/master into master" upstream/master 2>/dev/null || {
+              echo "CONFLICT! Manual resolution needed"
+              git merge --abort
+              exit 1
+            }
+          fi
+
+          # Check if workflow files changed
+          NEW_SHA=$(git rev-parse HEAD)
+          echo "New HEAD: $NEW_SHA"
+
+          if git diff --name-only HEAD..FETCH_HEAD -- .github/workflows/ 2>/dev/null | grep -q .; then
             echo "Workflow files changed, using API to update ref..."
-            gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/master"               --field sha="$NEW_SHA"               --field force=true
-            echo "Ref updated via API: $NEW_SHA"
+            # Push the commit objects first, then update ref via API
+            # Create the commit via Git Data API
+            gh api "repos/${{ github.repository }}/git/refs/heads/master"               --field sha="$NEW_SHA"               --field force=true
+            echo "Ref updated via API"
+          else
+            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git master
+            echo "Push successful"
           fi
