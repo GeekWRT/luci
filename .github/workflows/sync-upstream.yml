@@ -25,37 +25,37 @@ jobs:
           git fetch origin master
           git fetch upstream master
 
+          UPSTREAM_SHA=$(git rev-parse upstream/master)
+          FORK_SHA=$(git rev-parse origin/master)
+
           # Check if already up to date
-          if git merge-base --is-ancestor origin/master upstream/master &&              git diff --quiet origin/master upstream/master; then
+          if [ "$UPSTREAM_SHA" = "$FORK_SHA" ] || git merge-base --is-ancestor origin/master upstream/master 2>/dev/null; then
             echo "Already up to date with upstream"
             exit 0
           fi
 
-          # Try fast-forward first
-          git checkout master
-          if git merge --ff-only upstream/master 2>/dev/null; then
-            echo "Fast-forward merge successful"
-          else
-            echo "Not fast-forward, updating via merge..."
-            # Use git merge to create a merge commit
-            git merge -m "Merge upstream/master into master" upstream/master 2>/dev/null || {
-              echo "CONFLICT! Manual resolution needed"
-              git merge --abort
-              exit 1
-            }
-          fi
+          # Push upstream commits to a temporary ref
+          echo "Pushing upstream commits to temp ref..."
+          git push origin upstream/master:refs/tmp/sync-upstream 2>&1
 
-          # Check if workflow files changed
-          NEW_SHA=$(git rev-parse HEAD)
-          echo "New HEAD: $NEW_SHA"
+          # Use GitHub Merges API to create merge commit on the server
+          echo "Creating merge commit via API..."
+          MERGE_RESULT=$(gh api repos/${{ github.repository }}/merges \
+            --field base="master" \
+            --field head="refs/tmp/sync-upstream" \
+            --field commit_message="Merge upstream/master into master" 2>&1) || true
 
-          if git diff --name-only HEAD..FETCH_HEAD -- .github/workflows/ 2>/dev/null | grep -q .; then
-            echo "Workflow files changed, using API to update ref..."
-            # Push the commit objects first, then update ref via API
-            # Create the commit via Git Data API
-            gh api "repos/${{ github.repository }}/git/refs/heads/master"               --field sha="$NEW_SHA"               --field force=true
-            echo "Ref updated via API"
+          # Clean up temp ref
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tmp/sync-upstream 2>/dev/null || true
+
+          if echo "$MERGE_RESULT" | jq -e '.sha' > /dev/null 2>&1; then
+            NEW_SHA=$(echo "$MERGE_RESULT" | jq -r '.sha')
+            echo "Synced to: $NEW_SHA"
+          elif echo "$MERGE_RESULT" | grep -q "already exists\|Already up to date"; then
+            echo "Already up to date"
+          elif echo "$MERGE_RESULT" | grep -q "Merge conflict\|conflict"; then
+            echo "CONFLICT! Manual resolution needed"
+            exit 1
           else
-            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git master
-            echo "Push successful"
+            echo "Result: $MERGE_RESULT"
           fi
